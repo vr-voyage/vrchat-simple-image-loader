@@ -1,0 +1,19 @@
+{
+  "name": "io.github.vr-voyage.simple-scripts.simple-image-loader",
+  "displayName": "Voyage's Simple Scripts : Simple Image Loader",
+  "version": "0.0.1",
+  "description": "A Simple Image Loading prefab",
+	"author" : {
+		"name" : "Voyage Voyage",
+		"url" : "https://github.com/vr-voyage"
+	},
+  "gitDependencies": {},
+  "vpmDependencies": {
+    "com.vrchat.avatars" : ">=3.1.11",
+    "com.vrchat.udonsharp": ">=1.1.7"
+  },
+  "legacyFolders": {},
+  "legacyFiles": {},
+  "type": "sample",
+  "unity": "2019.4"
+}
