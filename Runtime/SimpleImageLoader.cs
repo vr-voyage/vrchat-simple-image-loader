@@ -3,12 +3,15 @@ using UdonSharp;
 using UnityEngine;
 using VRC.SDK3.Image;
 using VRC.SDKBase;
+using VRC.Udon.Common;
 using VRC.Udon.Common.Interfaces;
 
 namespace VRVoyage.SimpleScripts
 {
+    [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
     public class SimpleImageLoader : UdonSharpBehaviour
     {
+        
         public VRCUrl[] urls;
         public Material receivingMaterial;
         public Transform receivingPanel;
@@ -20,7 +23,14 @@ namespace VRVoyage.SimpleScripts
         public float pictureRefreshTime = 6; /* seconds */
 
         int urlIndex = 0;
+
+        [UdonSynced]
+        [HideInInspector]
+        public int syncedUrlIndex = -1;
+        public bool synchronise = false;
+
         VRCImageDownloader downloader;
+        IUdonEventReceiver imageDownloadHandler;
         TextureInfo info;
 
         Vector3 scale = Vector3.one;
@@ -30,9 +40,30 @@ namespace VRVoyage.SimpleScripts
         /* So 2023 ! */
         IVRCImageDownload lastError;
 
+        VRCPlayerApi localPlayer;
+        GameObject thisGameObject;
+
         void OnEnable()
         {
-            downloader = new VRCImageDownloader();
+
+            localPlayer = Networking.LocalPlayer;
+
+            if (localPlayer == null)
+            {
+                Debug.LogError($"[{name}] [{this.GetType().Name}] VRChat is broken. Disabling.");
+                enabled = false;
+                return;
+            }
+
+            thisGameObject = gameObject;
+
+            if (thisGameObject == null)
+            {
+                Debug.LogError($"[{name}] [{this.GetType().Name}] Unity is broken. Disabling.");
+                enabled = false;
+                return;
+            }
+
             if (urls == null || urls.Length == 0)
             {
                 Debug.LogError($"[{name}] [{this.GetType().Name}] No URLS set. Disabling.");
@@ -71,6 +102,7 @@ namespace VRVoyage.SimpleScripts
                 return;
             }
 
+            downloader = new VRCImageDownloader();
             loggingErrors = (errorOutput != null);
 
             info = new TextureInfo();
@@ -83,13 +115,94 @@ namespace VRVoyage.SimpleScripts
                 panelScaleX = scale.x;
             }
 
-            DownloadFromCurrentURL();
+            /* We only keep the component Enabled if it's Synchronised.
+             * Synchro doesn't work on 'Disabled' objects
+             */
+            enabled = synchronise;
 
+            imageDownloadHandler = (IUdonEventReceiver)this;
+
+            if (ShouldHandleDownload())
+            {
+                Synchronise();
+                DownloadFromCurrentURL();
+            }
+            
             if (loggingErrors)
             {
                 /* Ugh... */
                 CheckForErrors();
             }
+
+            
+        }
+
+        bool ShouldHandleDownload()
+        {
+            return (!synchronise || (Networking.GetOwner(thisGameObject) == localPlayer));
+        }
+
+        void Synchronise()
+        {
+            if (!synchronise) return;
+
+            GameObject thisObject = gameObject;
+            VRCPlayerApi localPlayer = Networking.LocalPlayer;
+            if (Networking.GetOwner(thisObject) == localPlayer)
+            {
+                syncedUrlIndex = urlIndex;
+                RequestSerialization();
+            }
+        }
+
+        public override void OnPostSerialization(SerializationResult result)
+        {
+            syncedUrlIndex = -1;
+        }
+
+        public override void OnDeserialization()
+        {
+            Debug.Log($"<color=yellow>DESERIALIZE syncedUrlIndex = {syncedUrlIndex} !</color>");
+            if (syncedUrlIndex == -1) return;
+
+            urlIndex = syncedUrlIndex;
+            downloader.DownloadImage(
+                CurrentURL(),
+                receivingMaterial,
+                imageDownloadHandler,
+                info);
+        }
+
+        public override void OnPlayerLeft(VRCPlayerApi player)
+        {
+            /* So...
+             * When a player quit and hands you the ownership of the object,
+             * OnOwnershipTransferred isn't called.
+             * Because... VRChat !
+             */
+            if ((synchronise) & (localPlayer.isMaster))
+            {
+                if (Networking.GetOwner(thisGameObject) != localPlayer)
+                {
+                    Networking.SetOwner(localPlayer, thisGameObject);
+                }
+                else
+                {
+                    OnOwnershipTransferred(localPlayer);
+                }
+            }
+        }
+
+        public override bool OnOwnershipRequest(VRCPlayerApi requestingPlayer, VRCPlayerApi requestedOwner)
+        {
+
+            return true;
+        }
+
+        public override void OnOwnershipTransferred(VRCPlayerApi player)
+        {
+            if ((!synchronise) | (player != localPlayer)) return;
+            DownloadFromNextURL();
         }
 
         #region Entrypoints
@@ -117,8 +230,12 @@ namespace VRVoyage.SimpleScripts
         public void DownloadFromNextURL()
         {
             urlIndex += 1;
+            Synchronise();
             DownloadFromCurrentURL();
         }
+
+
+
         #endregion
 
         #region Handle Downloads
@@ -134,14 +251,19 @@ namespace VRVoyage.SimpleScripts
 
         void ScheduleNextDownload()
         {
-            SendCustomEventDelayedSeconds(
-                "DownloadFromNextURL",
-                pictureRefreshTime,
-                VRC.Udon.Common.Enums.EventTiming.Update);
+            if (ShouldHandleDownload())
+            {
+                SendCustomEventDelayedSeconds(
+                    "DownloadFromNextURL",
+                    pictureRefreshTime,
+                    VRC.Udon.Common.Enums.EventTiming.Update);
+            }
+
         }
 
         void DownloadFromCurrentURL()
         {
+            if (!ShouldHandleDownload()) return;
             var url = CurrentURL();
             if (url == null)
             {
@@ -152,7 +274,7 @@ namespace VRVoyage.SimpleScripts
             downloader.DownloadImage(
                 CurrentURL(),
                 receivingMaterial,
-                (IUdonEventReceiver)this,
+                imageDownloadHandler,
                 info);
         }
         #endregion
@@ -195,6 +317,7 @@ namespace VRVoyage.SimpleScripts
         {
             if (loggingErrors == false) return;
             if (lastError == null) return;
+            Debug.Log($"<color=orange>Show Error : I am the master : {localPlayer.isMaster}");
 
             errorOutput.gameObject.SetActive(true);
             errorOutput.text = $"Error {lastError.Error}\n{lastError.ErrorMessage}";

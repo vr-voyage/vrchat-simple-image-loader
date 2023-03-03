@@ -24,6 +24,8 @@ namespace VRVoyage.SimpleScripts
         SerializedProperty errorTexture;
         SerializedProperty pictureRefreshTime;
 
+        SerializedProperty synchronise;
+
         private void OnEnable()
         {
             urls = serializedObject.FindProperty(nameof(SimpleImageLoader.urls));
@@ -33,6 +35,8 @@ namespace VRVoyage.SimpleScripts
             errorOutput = serializedObject.FindProperty(nameof(SimpleImageLoader.errorOutput));
             errorTexture = serializedObject.FindProperty(nameof(SimpleImageLoader.errorTexture));
             pictureRefreshTime = serializedObject.FindProperty(nameof(SimpleImageLoader.pictureRefreshTime));
+
+            synchronise = serializedObject.FindProperty(nameof(SimpleImageLoader.synchronise));
 
             /* Code shamelessly taken from USharpVideoInspector (USharpVideo : https://github.com/MerlinVR/USharpVideo) */
             urlsList = new ReorderableList(serializedObject, urls, true, true, true, true);
@@ -64,6 +68,12 @@ namespace VRVoyage.SimpleScripts
             if (UdonSharpGUI.DrawProgramSource(target)) return;
 
             EditorGUILayout.LabelField("Main Settings", EditorStyles.boldLabel);
+            EditorGUI.BeginChangeCheck();
+            synchronise.boolValue = EditorGUILayout.Toggle(
+                "Synchronise",
+                synchronise.boolValue);
+            EditorGUI.EndChangeCheck();
+
             urlsList.DoLayoutList();
             EditorGUILayout.PropertyField(
                 pictureRefreshTime,
