@@ -7,7 +7,8 @@
         "VRC.SDKBase.Editor",
         "io.github.vr-voyage.simple-scripts.simple-image-loader",
         "UdonSharp.Editor",
-        "Unity.TextMeshPro"
+        "Unity.TextMeshPro",
+        "UdonSharp.Runtime"
     ],
     "includePlatforms": [
         "Editor"

@@ -17,6 +17,7 @@ namespace VRVoyage.SimpleScripts
         public Transform receivingPanel;
         public bool rescalePanel = true;
         public TMPro.TextMeshPro errorOutput;
+        public TMPro.TextMeshPro statusOutput;
         public Texture2D errorTexture;
 
         const float minimumWaitTime = 5; /* seconds */
@@ -29,8 +30,15 @@ namespace VRVoyage.SimpleScripts
         public int syncedUrlIndex = -1;
         public bool synchronise = false;
 
-        VRCImageDownloader downloader;
+        VRCImageDownloader[] downloaders;
+        int currentDownloader = 0;
         IUdonEventReceiver imageDownloadHandler;
+        /* We need to ensure that the current download is finished
+         * before triggering the next one, else it will be queued
+         * and the display order will start to be messed up.
+         */
+        IVRCImageDownload currentDownload;
+
         TextureInfo info;
 
         Vector3 scale = Vector3.one;
@@ -39,9 +47,58 @@ namespace VRVoyage.SimpleScripts
         bool loggingErrors = false;
         /* So 2023 ! */
         IVRCImageDownload lastError;
+        bool errorCheckLoopOn = false;
 
         VRCPlayerApi localPlayer;
         GameObject thisGameObject;
+
+        [HideInInspector]
+        [UdonSynced]
+        public bool slideshowOn = false;
+
+        public bool startOnEnabled = true;
+
+        public GameObject playButton;
+        public GameObject stopButton;
+
+
+        #region UI
+
+        void ButtonShown(GameObject button, bool state)
+        {
+            if (button != null)
+            {
+                button.SetActive(state);
+            }
+        }
+
+        void ShowText(TMPro.TextMeshPro textOutput, string message)
+        {
+            if ((textOutput != null) | (message != null)) return;
+
+            textOutput.text = message;
+        }
+
+        void RefreshButtons()
+        {
+            ButtonShown(playButton, (slideshowOn));
+            ButtonShown(stopButton, (!slideshowOn));
+        }
+        #endregion
+
+        bool IOwnThisObject()
+        {
+            return localPlayer == Networking.GetOwner(thisGameObject);
+        }
+
+        void Awake()
+        {
+            if (rescalePanel & (receivingPanel != null))
+            {
+                scale = receivingPanel.localScale;
+                panelScaleX = scale.x;
+            }
+        }
 
         void OnEnable()
         {
@@ -102,53 +159,45 @@ namespace VRVoyage.SimpleScripts
                 return;
             }
 
-            downloader = new VRCImageDownloader();
+            downloaders = new VRCImageDownloader[2];
             loggingErrors = (errorOutput != null);
-
+            imageDownloadHandler = (IUdonEventReceiver)this;
             info = new TextureInfo();
             /* Don't repeat the bottom on the top, the left on the right, ... */
             info.WrapModeU = TextureWrapMode.Clamp;
             info.WrapModeV = TextureWrapMode.Clamp;
-            if (rescalePanel)
+            ButtonShown(playButton, ShouldHandleDownload());
+            ButtonShown(stopButton, false);
+
+            if (startOnEnabled)
             {
-                scale = receivingPanel.localScale;
-                panelScaleX = scale.x;
+                SlideshowStart();
             }
-
-            /* We only keep the component Enabled if it's Synchronised.
-             * Synchro doesn't work on 'Disabled' objects
-             */
-            enabled = synchronise;
-
-            imageDownloadHandler = (IUdonEventReceiver)this;
-
-            if (ShouldHandleDownload())
-            {
-                Synchronise();
-                DownloadFromCurrentURL();
-            }
-            
-            if (loggingErrors)
-            {
-                /* Ugh... */
-                CheckForErrors();
-            }
-
             
         }
 
         bool ShouldHandleDownload()
         {
-            return (!synchronise || (Networking.GetOwner(thisGameObject) == localPlayer));
+            return (!synchronise || IOwnThisObject());
+        }
+
+        #region VRChat Sync
+        public override void OnOwnershipTransferred(VRCPlayerApi player)
+        {
+            if (!ShouldHandleDownload()) return;
+
+            RefreshButtons();
+            if (slideshowOn)
+            {
+                DownloadFromNextURL();
+            }
         }
 
         void Synchronise()
         {
             if (!synchronise) return;
 
-            GameObject thisObject = gameObject;
-            VRCPlayerApi localPlayer = Networking.LocalPlayer;
-            if (Networking.GetOwner(thisObject) == localPlayer)
+            if (IOwnThisObject())
             {
                 syncedUrlIndex = urlIndex;
                 RequestSerialization();
@@ -162,27 +211,22 @@ namespace VRVoyage.SimpleScripts
 
         public override void OnDeserialization()
         {
-            Debug.Log($"<color=yellow>DESERIALIZE syncedUrlIndex = {syncedUrlIndex} !</color>");
-            if (syncedUrlIndex == -1) return;
-
+            if (syncedUrlIndex < 0) return;
+ 
             urlIndex = syncedUrlIndex;
-            downloader.DownloadImage(
-                CurrentURL(),
-                receivingMaterial,
-                imageDownloadHandler,
-                info);
+            DownloadCurrent();
         }
 
         public override void OnPlayerLeft(VRCPlayerApi player)
         {
             /* So...
-             * When a player quit and hands you the ownership of the object,
+             * When a player quits and hands you the ownership of the object,
              * OnOwnershipTransferred isn't called.
              * Because... VRChat !
              */
             if ((synchronise) & (localPlayer.isMaster))
             {
-                if (Networking.GetOwner(thisGameObject) != localPlayer)
+                if (!IOwnThisObject())
                 {
                     Networking.SetOwner(localPlayer, thisGameObject);
                 }
@@ -193,48 +237,94 @@ namespace VRVoyage.SimpleScripts
             }
         }
 
-        public override bool OnOwnershipRequest(VRCPlayerApi requestingPlayer, VRCPlayerApi requestedOwner)
-        {
 
-            return true;
+        #endregion
+
+        void DisposeAllDownloaders()
+        {
+            int nDownloaders = downloaders.Length;
+            for (int i = 0; i < nDownloaders; i++)
+            {
+                var downloader = downloaders[i];
+                if (downloader == null) continue;
+                downloader.Dispose();
+                downloaders[i] = null;
+            }
         }
 
-        public override void OnOwnershipTransferred(VRCPlayerApi player)
+        VRCImageDownloader GetNextDownloader()
         {
-            if ((!synchronise) | (player != localPlayer)) return;
-            DownloadFromNextURL();
+            int nextIndex = (currentDownloader + 1) & 1;
+            /* Get rid of the old one if available */
+            var staleDownloader = downloaders[nextIndex];
+            if (staleDownloader != null) staleDownloader.Dispose();
+
+            var newDownloader = new VRCImageDownloader();
+            downloaders[nextIndex] = newDownloader;
+            currentDownloader = nextIndex;
+
+            return newDownloader;
         }
+
+        void DownloadCurrent()
+        {
+            var downloader = GetNextDownloader();
+            
+            var currentUrl = CurrentURL();
+            currentDownload = downloader.DownloadImage(
+                currentUrl,
+                receivingMaterial,
+                imageDownloadHandler,
+                info);
+            ShowText(statusOutput, "Downloading from " + currentUrl.ToString());
+            //Debug.Log("<color=cyan>currentDownload set !</color>");
+        }
+
+
+
+
 
         #region Entrypoints
-        /* Alright, so, right now, OnImageLoadError is called from a thread,
-         * that cannot access Unity UI.
-         *
-         * So in order to show any error, I need to POLL on an error object
-         * and use it if it is set !
-         * 
-         * I'm basically polling on the equivalent of 'errno' in 2023 because
-         * some people thought it would be a good idea to call errors handlers
-         * from a thread !
-         */
-        public void CheckForErrors()
-        {
-            if (lastError != null)
-            {
-                ShowError();
-            }
-
-            lastError = null;
-            SendCustomEventDelayedSeconds("CheckForErrors", 2);
-        }
 
         public void DownloadFromNextURL()
         {
+            if (currentDownload.State == VRCImageDownloadState.Pending)
+            {
+                SendCustomEventDelayedSeconds(nameof(DownloadFromNextURL), 1);
+                return;
+            }
             urlIndex += 1;
+            if (!slideshowOn) return;
             Synchronise();
             DownloadFromCurrentURL();
         }
 
+        public void SlideshowStart()
+        {
+            if (!ShouldHandleDownload()) return;
+            if (slideshowOn) return;
 
+            ButtonShown(playButton, false);
+            slideshowOn = true;
+
+            if (ShouldHandleDownload())
+            {
+                Synchronise();
+                DownloadFromCurrentURL();
+            }
+
+            ButtonShown(stopButton, true);
+        }
+
+        public void SlideshowStop()
+        {
+            //Debug.Log("<color=yellow>Stopping</color>");
+            if (!slideshowOn) return;
+            slideshowOn = false;
+            Synchronise();
+
+            RefreshButtons();            
+        }
 
         #endregion
 
@@ -251,31 +341,32 @@ namespace VRVoyage.SimpleScripts
 
         void ScheduleNextDownload()
         {
-            if (ShouldHandleDownload())
+            if (slideshowOn & ShouldHandleDownload())
             {
                 SendCustomEventDelayedSeconds(
-                    "DownloadFromNextURL",
+                    nameof(DownloadFromNextURL),
                     pictureRefreshTime,
                     VRC.Udon.Common.Enums.EventTiming.Update);
             }
-
         }
 
         void DownloadFromCurrentURL()
         {
             if (!ShouldHandleDownload()) return;
-            var url = CurrentURL();
-            if (url == null)
+
+            /* If the current URL is null, it means that
+             * the user forgot to setup the component
+             * correctly.
+             * This can happen. Let's just skip to the next
+             * Download.
+             */
+            if (CurrentURL() == null)
             {
                 ScheduleNextDownload();
                 return;
             }
 
-            downloader.DownloadImage(
-                CurrentURL(),
-                receivingMaterial,
-                imageDownloadHandler,
-                info);
+            DownloadCurrent();
         }
         #endregion
 
@@ -293,11 +384,8 @@ namespace VRVoyage.SimpleScripts
 
         public override void OnImageLoadError(IVRCImageDownload result)
         {
-            if (result.State == VRCImageDownloadState.Error)
-            {
-                lastError = result;
-                ScheduleNextDownload();
-            }
+            ShowError();
+            ScheduleNextDownload();
         }
 
         void RescalePanelWidth(float ratio)
@@ -317,7 +405,6 @@ namespace VRVoyage.SimpleScripts
         {
             if (loggingErrors == false) return;
             if (lastError == null) return;
-            Debug.Log($"<color=orange>Show Error : I am the master : {localPlayer.isMaster}");
 
             errorOutput.gameObject.SetActive(true);
             errorOutput.text = $"Error {lastError.Error}\n{lastError.ErrorMessage}";
@@ -333,7 +420,12 @@ namespace VRVoyage.SimpleScripts
         }
         #endregion
 
-
+        void OnDisable()
+        {
+            SlideshowStop();
+            RescalePanelWidth(1);
+            DisposeAllDownloaders();
+        }
     }
 
 }
